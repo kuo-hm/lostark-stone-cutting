@@ -11,9 +11,10 @@ class Diamond(ctk.CTkCanvas):
     A custom canvas widget representing a single ability stone node (diamond).
     Supports states: empty, success, fail.
     """
-    def __init__(self, master, size=30, **kwargs):
+    def __init__(self, master, size=30, success_color="#3b82f6", **kwargs):
         super().__init__(master, width=size, height=size, highlightthickness=0, **kwargs)
         self.size = size
+        self.success_color = success_color
         
         # Resolve background color to match parent
         bg_color = master.cget("fg_color")
@@ -55,7 +56,7 @@ class Diamond(ctk.CTkCanvas):
         color = "#e5e7eb"
         
         if self.state == "success":
-            color = "#3b82f6" # Blue
+            color = self.success_color
         elif self.state == "fail":
             color = "#6b7280" # Gray
         elif self.state == "empty":
@@ -84,7 +85,7 @@ class StoneRow(ctk.CTkFrame):
         
         self.diamonds = []
         for i in range(10):
-            d = Diamond(self, size=30)
+            d = Diamond(self, size=30, success_color=color)
             d.pack(side="left", padx=2)
             self.diamonds.append(d)
 
@@ -154,7 +155,10 @@ class StoneCutterApp(ctk.CTk):
         self.status_frame.grid(row=2, column=0, padx=20, pady=(0, 20), sticky="ew")
         
         self.status_btn = ctk.CTkButton(self.status_frame, text="Recognize and Start", font=("Arial", 24, "bold"), text_color="#374151", fg_color="transparent", hover_color="#e5e7eb", command=self.perform_recognition)
-        self.status_btn.pack(pady=30)
+        self.status_btn.pack(pady=(20, 10))
+        
+        self.prob_label = ctk.CTkLabel(self.status_frame, text="Current Chance: 75%", font=("Arial", 18, "bold"), text_color="#3b82f6")
+        self.prob_label.pack(pady=(0, 20))
 
     def render_stones(self):
         """Renders the main ability stone rows."""
@@ -181,7 +185,7 @@ class StoneCutterApp(ctk.CTk):
         
         self.update_preview()
 
-    def detect_nodes(self, nodes_img):
+    def detect_nodes(self, nodes_img, is_malice=False):
         """
         Analyzes the nodes image region to determine the state of each diamond.
         Splits the image into 10 chunks and uses template matching + color validation.
@@ -192,7 +196,8 @@ class StoneCutterApp(ctk.CTk):
         import os
         
         base_path = os.path.dirname(os.path.abspath(__file__))
-        folder = os.path.join(base_path, "nodes")
+        folder_name = "nodes/bad" if is_malice else "nodes"
+        folder = os.path.join(base_path, folder_name)
         
         t_normal = cv2.imread(os.path.join(folder, "normal.png"))
         t_success = cv2.imread(os.path.join(folder, "success.png"))
@@ -241,11 +246,20 @@ class StoneCutterApp(ctk.CTk):
                 avg_bgr = np.mean(center_crop, axis=(0, 1))
                 b, g, r = avg_bgr
                 
-                is_blue = (b > r + 20) and (b > g + 20)
+                is_color_match = False
+                if is_malice:
+                    # Red dominance check
+                    # Red should be dominant over Blue and Green
+                    is_color_match = (r > b + 20) and (r > g + 20)
+                    debug_color = f"R={r:.1f} G={g:.1f} B={b:.1f}"
+                else:
+                    # Blue dominance check
+                    is_color_match = (b > r + 20) and (b > g + 20)
+                    debug_color = f"B={b:.1f} G={g:.1f} R={r:.1f}"
                 
-                # Override: Success must be blue
-                if best_state == "success" and not is_blue:
-                     print(f"Node {i}: Overriding Success -> Fail (Not Blue: B={b:.1f} G={g:.1f} R={r:.1f})")
+                # Override: Success must match the expected color
+                if best_state == "success" and not is_color_match:
+                     print(f"Node {i}: Overriding Success -> Fail (Color Mismatch {debug_color})")
                      best_state = "fail"
             
             if best_score < 0.5:
@@ -282,6 +296,49 @@ class StoneCutterApp(ctk.CTk):
         self.vision.set_target_window(window_data['id'])
         top_window.destroy()
 
+    def calculate_probability(self):
+        """
+        Calculates the current success probability based on the total successes and fails.
+        Base: 75%
+        Success: -10%
+        Fail: +10%
+        Clamped: [25%, 75%]
+        
+        We sum states from all 3 rows.
+        """
+        total_success = 0
+        total_fail = 0
+        
+        # Collect from all diamonds
+        for row in [self.ability1, self.ability2, self.malice]:
+            for d in row.diamonds:
+                if d.state == "success":
+                    total_success += 1
+                elif d.state == "fail":
+                    total_fail += 1
+                    
+        # Calculate
+        # Since we don't know the order, we assume the net change is purely additive
+        # This is an approximation if the caps were hit frequently in between, 
+        # but for a static view, it's the standard interpretation.
+        base_p = 75
+        current_p = base_p + (total_fail * 10) - (total_success * 10)
+        
+        # Clamp
+        final_p = max(25, min(75, current_p))
+        
+        # Update UI
+        self.prob_label.configure(text=f"Current Chance: {final_p}%")
+        
+        # Color code the probability
+        color = "#3b82f6" # Blue
+        if final_p <= 35:
+            color = "#ef4444" # Red
+        elif final_p <= 55:
+            color = "#f59e0b" # Orange/Amber
+            
+        self.prob_label.configure(text_color=color)
+
     def perform_recognition(self):
         """
         Core logic to perform image recognition:
@@ -294,6 +351,8 @@ class StoneCutterApp(ctk.CTk):
         import os
         import cv2
         import numpy as np
+        import os
+        import pytesseract
         
         base_path = os.path.dirname(os.path.abspath(__file__))
         anchor_path = os.path.join(base_path, "ability-improve.png")
@@ -389,7 +448,12 @@ class StoneCutterApp(ctk.CTk):
                     
                     self.malice.set_icon(r3_engraving)
                     
-                    # Note: Malice states might need red templates, but using blue logic for now
+                    # Malice Recognition
+                    states = self.detect_nodes(r3_nodes, is_malice=True)
+                    print(f"Malice States: {states}")
+                    for i, s in enumerate(states):
+                        self.malice.set_diamond_state(i, s)
+                    
                     msg += " M Saved."
                 else:
                     msg += " M OOB."
@@ -398,6 +462,64 @@ class StoneCutterApp(ctk.CTk):
             else:
                 msg = "No Frame"
                 color = "red"
+                
+            # OCR Success Rate
+            # Search for success_rate.png
+            success_template_path = os.path.join(base_path, "success_rate.png")
+            rate_res = self.vision.find_template(success_template_path, threshold=0.9)
+            
+            ocr_active = False
+            if rate_res:
+                print(f"Success Rate Anchor found at {rate_res['rect']}")
+                # Extract ROI +5px right
+                rt_x, rt_y = rate_res['rect'][0]
+                rt_w = rate_res['rect'][1][0] - rt_x
+                rt_h = rate_res['rect'][1][1] - rt_y
+                
+                roi_x = rt_x + rt_w + 3 # Shift left by 2px (was +5) to avoid cutting numbers
+                roi_y = rt_y
+                roi_w = 50 # Capture enough width for "75%"
+                roi_h = rt_h
+                
+                # Use current_frame if available (it might be old if captured at start of func?)
+                # best to re-grab or reuse if scene static. Reusing `current_frame` from start.
+                if current_frame is not None:
+                     fh, fw = current_frame.shape[:2]
+                     if roi_x + roi_w <= fw and roi_y + roi_h <= fh:
+                         roi = current_frame[roi_y:roi_y+roi_h, roi_x:roi_x+roi_w]
+                         
+                         # Preprocess for OCR
+                         roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                         _, roi_thresh = cv2.threshold(roi_gray, 150, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+                         
+                         # Debug
+                         cv2.imwrite(os.path.join(base_path, "debug_ocr_roi.png"), roi_thresh)
+                         
+                         try:
+                             # Tesseract
+                             text = pytesseract.image_to_string(roi_thresh, config='--psm 7 digits')
+                             print(f"OCR Raw Text: '{text.strip()}'")
+                             
+                             # Parse number - Take first 2 digits
+                             import re
+                             digits = re.findall(r'\d', text)
+                             if len(digits) >= 2:
+                                 val_str = "".join(digits[:2])
+                                 val = int(val_str)
+                                 
+                                 # Validate
+                                 if 25 <= val <= 75:
+                                     self.prob_label.configure(text=f"Current Chance: {val}%")
+                                     ocr_active = True
+                                     
+                                     # Color
+                                     c = "#3b82f6"
+                                     if val <= 35: c = "#ef4444"
+                                     elif val <= 55: c = "#f59e0b"
+                                     self.prob_label.configure(text_color=c)
+                         except Exception as e:
+                             print(f"OCR Error: {e}")
+
         else:
             msg = "Anchor Not Found"
             color = "red"
@@ -405,6 +527,11 @@ class StoneCutterApp(ctk.CTk):
         self.status_btn.configure(text=msg, text_color=color)
         if not "Found" in msg:
              self.after(2000, lambda: self.status_btn.configure(text="Recognize and Start", text_color="#374151"))
+
+        # Calculate Probability (Fallback if OCR didn't update it)
+        if not ocr_active:
+             print("OCR failed or not found, using estimation.")
+             self.calculate_probability()
 
     def update_preview(self):
         """Updates the live preview label with the latest captured frame."""
