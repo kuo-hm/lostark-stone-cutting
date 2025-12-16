@@ -2,6 +2,8 @@ import customtkinter as ctk
 import tkinter as tk
 from PIL import Image
 from vision_service import ScreenCapture
+from stone_logic import calculate_best_move, GoalConfig
+from gemini_service import GeminiAdvisor
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -116,7 +118,10 @@ class StoneCutterApp(ctk.CTk):
         super().__init__()
         
         self.vision = ScreenCapture()
-        self.vision.start()
+        self.gemini = GeminiAdvisor()
+        
+        # Load GUI
+        # self.vision.start() # No continuous capture
 
         self.title("Lost Ark Stone Cutter")
         self.geometry("800x600")
@@ -133,15 +138,25 @@ class StoneCutterApp(ctk.CTk):
         """Renders the top header section."""
         header_frame = ctk.CTkFrame(self, fg_color="transparent")
         header_frame.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
+        # Left side buttons
+        # 77 Mode: Default
+        self.btn_77 = ctk.CTkButton(header_frame, text="77 Mode", width=100, fg_color="#f97316", text_color="black", hover_color="#fdba74", border_width=2, border_color="#f97316", command=lambda: self.set_mode("77")) # Selected style
+        self.btn_77.pack(side="left", padx=5)
         
-        btn_77 = ctk.CTkButton(header_frame, text="77 Mode", width=100, fg_color="white", text_color="black", hover_color="#f3f4f6", border_width=2, border_color="#f97316")
-        btn_77.pack(side="left", padx=5)
+        # 97 Mode
+        self.btn_97 = ctk.CTkButton(header_frame, text="97 Mode", width=100, fg_color="white", text_color="gray", hover_color="#f3f4f6", border_width=1, border_color="#e5e7eb", command=lambda: self.set_mode("97"))
+        self.btn_97.pack(side="left", padx=5)
         
-        btn_97 = ctk.CTkButton(header_frame, text="97 Mode", width=100, fg_color="white", text_color="gray", hover_color="#f3f4f6", border_width=1, border_color="#e5e7eb")
-        btn_97.pack(side="left", padx=5)
+        self.target_line_var = ctk.StringVar(value="Line 1")
+        self.line_selector = ctk.CTkComboBox(header_frame, values=["Line 1", "Line 2"], variable=self.target_line_var, width=100, state="readonly")
+        # Don't pack initially (Default 77 mode)
+
+        self.target_mode = "77" # Default
         
-        engraving_select = ctk.CTkComboBox(header_frame, values=["Select Engraving 7"])
-        engraving_select.pack(side="left", padx=5)
+        # Calc Mode Switch
+        self.calc_mode_var = ctk.StringVar(value="Algo")
+        self.calc_switch = ctk.CTkSegmentedButton(header_frame, values=["Algo", "Gemini"], variable=self.calc_mode_var, command=self.on_calc_mode_change)
+        self.calc_switch.pack(side="left", padx=20)
 
         monitor_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         monitor_frame.pack(side="right")
@@ -154,11 +169,22 @@ class StoneCutterApp(ctk.CTk):
         self.status_frame = ctk.CTkFrame(self, fg_color="#f9fafb", corner_radius=10)
         self.status_frame.grid(row=2, column=0, padx=20, pady=(0, 20), sticky="ew")
         
-        self.status_btn = ctk.CTkButton(self.status_frame, text="Recognize and Start", font=("Arial", 24, "bold"), text_color="#374151", fg_color="transparent", hover_color="#e5e7eb", command=self.perform_recognition)
-        self.status_btn.pack(pady=(20, 10))
+        # Create a sub-frame for buttons to keep them grouped
+        button_frame = ctk.CTkFrame(self.status_frame, fg_color="transparent")
+        button_frame.pack(pady=(20, 10)) # Pack this frame with padding
         
-        self.prob_label = ctk.CTkLabel(self.status_frame, text="Current Chance: 75%", font=("Arial", 18, "bold"), text_color="#3b82f6")
-        self.prob_label.pack(pady=(0, 20))
+        self.status_btn = ctk.CTkButton(button_frame, text="Scan & Calculate", width=200, height=40, font=("Inter", 16, "bold"), fg_color="white", text_color="#374151", hover_color="#f3f4f6", command=self.perform_recognition)
+        self.status_btn.pack(side="left", padx=10)
+        
+        self.status_btn.pack(side="left", padx=10)
+        
+        # Calculate Button removed (merged)
+
+        self.prob_label = ctk.CTkLabel(self.status_frame, text="Current Chance: 75%", font=("Inter", 16, "bold"), text_color="#3b82f6")
+        self.prob_label.pack(pady=(0, 5))
+        
+        self.goal_status_label = ctk.CTkLabel(self.status_frame, text="Goal: Pending", font=("Inter", 14), text_color="gray")
+        self.goal_status_label.pack(pady=(0, 20))
 
     def render_stones(self):
         """Renders the main ability stone rows."""
@@ -184,6 +210,140 @@ class StoneCutterApp(ctk.CTk):
         self.preview_label.pack(fill="both", expand=True, padx=2, pady=2)
         
         self.update_preview()
+
+    def set_mode(self, mode):
+        self.target_mode = mode
+        if mode == "77":
+            self.btn_77.configure(fg_color="#f97316", border_width=2, text_color="black")
+            self.btn_97.configure(fg_color="white", border_width=1, text_color="gray")
+            self.line_selector.pack_forget()
+        else:
+            self.btn_77.configure(fg_color="white", border_width=1, text_color="gray")
+            self.btn_97.configure(fg_color="#f97316", border_width=2, text_color="black")
+            # Pack after btn_97
+            self.line_selector.pack(side="left", padx=5, after=self.btn_97)
+        
+    def on_calc_mode_change(self, value):
+        print(f"Logic Mode changed to: {value}")
+            
+    def get_row_stats(self, row):
+        success = 0
+        fail = 0
+        remaining = 0
+        for d in row.diamonds:
+            if d.state == "success": success += 1
+            elif d.state == "fail": fail += 1
+            elif d.state == "empty": remaining += 1
+        return success, fail, remaining
+
+    def run_optimization(self):
+        # 1. Gather State
+        try:
+            # Get probability from label "Current Chance: XX%"
+            txt = self.prob_label.cget("text")
+            import re
+            match = re.search(r'(\d+)%', txt)
+            if match:
+                prob_val = int(match.group(1)) / 100.0
+            else:
+                prob_val = 0.75
+        except:
+            prob_val = 0.75
+
+        # 3. Gather State (Common for both Algo and Gemini)
+        l1_s, l1_f, l1_r = self.get_row_stats(self.ability1)
+        l2_s, l2_f, l2_r = self.get_row_stats(self.ability2)
+        m_s, m_f, m_r = self.get_row_stats(self.malice)
+        
+        state = {
+            "prob": prob_val,
+            "l1_s": l1_s, "l1_r": l1_r,
+            "l2_s": l2_s, "l2_r": l2_r,
+            "mal_s": m_s, "mal_r": m_r
+        }
+        
+        print(f"Current State: {state}")
+        
+        # 4. Define Goals
+        goals = []
+        if self.target_mode == "97":
+            target_line = self.target_line_var.get()
+            print(f"97 Mode Target: {target_line}")
+            
+            if target_line == "Line 1":
+                # Line 1 needs 9, Line 2 needs 7
+                goals.append(GoalConfig(9, 7, 4, strict_order=True))
+            else:
+                # Line 1 needs 7, Line 2 needs 9
+                goals.append(GoalConfig(7, 9, 4, strict_order=True))
+                
+            # Fallback 7/7
+            goals.append(GoalConfig(7, 7, 4, strict_order=True))
+        else:
+            # 7/7
+            goals.append(GoalConfig(7, 7, 4, strict_order=True))
+            
+        # 5. Run Logic
+        best_move = None
+        current_mode = self.calc_mode_var.get()
+        active_goal = None # Initialize to prevent UnboundLocalError
+        
+        if current_mode == "Algo":
+            best_move, moves, active_goal = calculate_best_move(state, goals)
+            print(f"Math Engine Result: {best_move} | Moves: {moves}")
+        else:
+            # Gemini Logic Mode
+            target_line = self.target_line_var.get() if self.target_mode == "97" else "Any"
+            print("Sending State to Gemini Logic...")
+            move, reason = self.gemini.get_suggestion(state, self.target_mode, target_line)
+            if move:
+                best_move = move
+                print(f"Gemini Result: {best_move} ({reason})")
+            else:
+                print(f"Gemini Logic Failed: {reason}")
+        
+        # 6. Check Feasibility (Update Goal Status)
+        # We check if the *Primary* goal for the current mode is possible.
+        # We can deduce this by running calculate_best_move with ONLY the primary goal.
+        
+        primary_goal = None
+        if self.target_mode == "97":
+            t_line = self.target_line_var.get()
+            if t_line == "Line 1": primary_goal = GoalConfig(9, 7, 4, strict_order=True)
+            else: primary_goal = GoalConfig(7, 9, 4, strict_order=True)
+            target_str = "9/7"
+        else:
+            primary_goal = GoalConfig(7, 7, 4, strict_order=True)
+            target_str = "7/7"
+            
+        check_move, check_probs, check_goal = calculate_best_move(state, [primary_goal])
+        
+        if check_goal is not None:
+             # Get max probability from the checking result
+             max_prob = max(check_probs.values()) if check_probs else 0.0
+             sub_percent = max_prob * 100
+             self.goal_status_label.configure(text=f"{target_str} Possible ({sub_percent:.4f}%)", text_color="#10b981") # Green
+        else:
+             self.goal_status_label.configure(text=f"{target_str} IMPOSSIBLE", text_color="#ef4444") # Red
+        
+        # 4. Highlight UI
+        self.ability1.configure(border_width=0)
+        self.ability2.configure(border_width=0)
+        self.malice.configure(border_width=0)
+        
+        highlight_color = "#10b981" # Emerald
+        
+        if best_move == "Line 1":
+            self.ability1.configure(border_width=3, border_color=highlight_color)
+        elif best_move == "Line 2":
+            self.ability2.configure(border_width=3, border_color=highlight_color)
+        elif best_move == "Malus":
+            self.malice.configure(border_width=3, border_color=highlight_color)
+            
+        # Optional: Show EV/Goal info in status
+        if active_goal:
+             # self.status_btn.configure(text=f"Target: {active_goal.target_main}/{active_goal.target_off} | Best: {best_move}")
+             pass
 
     def detect_nodes(self, nodes_img, is_malice=False):
         """
@@ -341,13 +501,25 @@ class StoneCutterApp(ctk.CTk):
 
     def perform_recognition(self):
         """
-        Core logic to perform image recognition:
-        1. Find anchor.
-        2. Extract rows based on calculated offsets.
-        3. Save debug images.
-        4. Detect node states and update GUI.
+        Captures screen, finds anchor, extracts nodes, calculates prob, and runs optimization.
         """
         print("Starting recognition...")
+        self.status_btn.configure(text="Scanning...", text_color="orange")
+        self.update_idletasks()
+        
+        # 1. Capture Frame (On-Demand)
+        current_frame = self.vision.capture_screenshot()
+        
+        if current_frame is None:
+             print("Screenshot failed.")
+             self.status_btn.configure(text="Capture Failed", text_color="red")
+             return
+
+        # Update Preview with this static frame
+        self._show_static_preview(current_frame)
+        
+        ocr_active = False # Initialize result
+        
         import os
         import cv2
         import numpy as np
@@ -390,7 +562,7 @@ class StoneCutterApp(ctk.CTk):
             r3_x = anchor_x
             r3_y = anchor_y + y_offset_3 - padding
             
-            current_frame = self.vision.get_latest_frame()
+            # current_frame is already captured at the start of the function
             if current_frame is not None:
                 frame_h, frame_w = current_frame.shape[:2]
                 
@@ -401,8 +573,8 @@ class StoneCutterApp(ctk.CTk):
                     r1_engraving = row1_img[:, 0:90]
                     r1_nodes = row1_img[:, 100:500]
                     
-                    cv2.imwrite(os.path.join(base_path, "debug_row1_engraving.png"), r1_engraving)
-                    cv2.imwrite(os.path.join(base_path, "debug_row1_nodes.png"), r1_nodes)
+                    # cv2.imwrite(os.path.join(base_path, "debug_row1_engraving.png"), r1_engraving)
+                    # cv2.imwrite(os.path.join(base_path, "debug_row1_nodes.png"), r1_nodes)
                     
                     self.ability1.set_icon(r1_engraving)
                     
@@ -422,8 +594,8 @@ class StoneCutterApp(ctk.CTk):
                     r2_engraving = row2_img[:, 0:90]
                     r2_nodes = row2_img[:, 100:500]
  
-                    cv2.imwrite(os.path.join(base_path, "debug_row2_engraving.png"), r2_engraving)
-                    cv2.imwrite(os.path.join(base_path, "debug_row2_nodes.png"), r2_nodes)
+                    # cv2.imwrite(os.path.join(base_path, "debug_row2_engraving.png"), r2_engraving)
+                    # cv2.imwrite(os.path.join(base_path, "debug_row2_nodes.png"), r2_nodes)
                     
                     self.ability2.set_icon(r2_engraving)
                     
@@ -443,8 +615,8 @@ class StoneCutterApp(ctk.CTk):
                     r3_engraving = row3_img[:, 0:90]
                     r3_nodes = row3_img[:, 100:500]
 
-                    cv2.imwrite(os.path.join(base_path, "debug_row3_engraving.png"), r3_engraving)
-                    cv2.imwrite(os.path.join(base_path, "debug_row3_nodes.png"), r3_nodes)
+                    # cv2.imwrite(os.path.join(base_path, "debug_row3_engraving.png"), r3_engraving)
+                    # cv2.imwrite(os.path.join(base_path, "debug_row3_nodes.png"), r3_nodes)
                     
                     self.malice.set_icon(r3_engraving)
                     
@@ -476,7 +648,7 @@ class StoneCutterApp(ctk.CTk):
                 rt_w = rate_res['rect'][1][0] - rt_x
                 rt_h = rate_res['rect'][1][1] - rt_y
                 
-                roi_x = rt_x + rt_w + 3 # Shift left by 2px (was +5) to avoid cutting numbers
+                roi_x = rt_x + rt_w -2 # Shift left by 2px (was +5) to avoid cutting numbers
                 roi_y = rt_y
                 roi_w = 50 # Capture enough width for "75%"
                 roi_h = rt_h
@@ -490,10 +662,10 @@ class StoneCutterApp(ctk.CTk):
                          
                          # Preprocess for OCR
                          roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                         _, roi_thresh = cv2.threshold(roi_gray, 150, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+                         _, roi_thresh = cv2.threshold(roi_gray, 148, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
                          
                          # Debug
-                         cv2.imwrite(os.path.join(base_path, "debug_ocr_roi.png"), roi_thresh)
+                         # cv2.imwrite(os.path.join(base_path, "debug_ocr_roi.png"), roi_thresh)
                          
                          try:
                              # Tesseract
@@ -532,17 +704,31 @@ class StoneCutterApp(ctk.CTk):
         if not ocr_active:
              print("OCR failed or not found, using estimation.")
              self.calculate_probability()
+             
+        # Run Optimization (Merged)
+        self.run_optimization()
 
     def update_preview(self):
-        """Updates the live preview label with the latest captured frame."""
-        img = self.vision.get_latest_frame_as_image()
-        if img:
-            target_h = 250
-            aspect = img.width / img.height
-            target_w = int(target_h * aspect)
-            
-            img.thumbnail((target_w, target_h))
-            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(target_w, target_h))
-            self.preview_label.configure(image=ctk_img, text="")
+        """No-op for continuous preview. We use static preview now."""
+        pass
         
-        self.after(50, self.update_preview)
+    def _show_static_preview(self, frame):
+        """Updates the preview label with the given frame."""
+        import cv2
+        from PIL import Image
+        if frame is None: return
+        
+        # Convert BGR to RGB
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        im_pil = Image.fromarray(img_rgb)
+        
+        # Resize to fit 400x300
+        w, h = im_pil.size
+        ratio = min(400/w, 300/h)
+        new_w = int(w * ratio)
+        new_h = int(h * ratio)
+        
+        im_pil = im_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        
+        ctk_img = ctk.CTkImage(light_image=im_pil, dark_image=im_pil, size=(new_w, new_h))
+        self.preview_label.configure(text="", image=ctk_img)

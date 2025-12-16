@@ -78,71 +78,45 @@ class ScreenCapture:
         except Exception as e:
             print(f"Error updating region: {e}")
 
-    def start(self):
+    def capture_screenshot(self):
         """
-        Starts the background capture thread.
+        Captures a single frame of the current region.
+        Returns the image as a numpy array (BGRA) or None.
         """
-        if self.running:
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self.thread.start()
+        if self.target_window_id:
+             self.update_region_from_window()
+        
+        region = self.capture_region
+        # Default to monitor 1 if no region
+        if not region:
+            with mss.mss() as sct:
+                region = sct.monitors[1]
 
-    def stop(self):
-        """
-        Stops the background capture thread.
-        """
-        self.running = False
-        if hasattr(self, 'thread'):
-            self.thread.join(timeout=1.0)
-
-    def _capture_loop(self):
-        """
-        Main loop for capturing screen frames. Handles switching between MSS and Grim
-        if necessary (e.g., on Wayland) and manages frame rate.
-        """
-        with mss.mss() as sct:
-            while self.running:
-                if self.target_window_id:
-                    # Periodically check window position
-                    if time.time() % 2 < 0.1:
-                         self.update_region_from_window()
-                
-                region = self.capture_region
-                if not region:
-                    region = sct.monitors[1]
-
-                try:
-                    img = None
-                    
-                    if self.use_grim:
-                        img = self._capture_grim(region)
-                        if img is None:
-                            time.sleep(1)
-                            continue
-                    else:
-                        try:
-                            img_mss = sct.grab(region)
-                            img = np.array(img_mss)
-                        except Exception as e:
-                            print(f"MSS Capture error: {e}")
-                            if "XGetImage" in str(e) and shutil.which("grim"):
-                                print("Switching to grim for Wayland capture...")
-                                self.use_grim = True
-                                continue
-                            else:
-                                time.sleep(1)
-                                continue
-
-                    if img is not None:
+        try:
+            if self.use_grim:
+                img = self._capture_grim(region)
+                if img is not None:
+                     with self.lock:
+                        self.latest_frame = img
+                return img
+            else:
+                with mss.mss() as sct:
+                    try:
+                        img_mss = sct.grab(region)
+                        img = np.array(img_mss)
                         with self.lock:
                             self.latest_frame = img
-                    
-                except Exception as e:
-                    print(f"Loop error: {e}")
-                    time.sleep(1)
-                
-                time.sleep(1/10 if self.use_grim else 1/30)
+                        return img
+                    except Exception as e:
+                        print(f"MSS Capture error: {e}")
+                        if "XGetImage" in str(e) and shutil.which("grim"):
+                            print("Switching to grim for Wayland capture...")
+                            self.use_grim = True
+                            return self.capture_screenshot() # Retry with grim
+                        return None
+        except Exception as e:
+            print(f"Capture error: {e}")
+            return None
 
     def _capture_grim(self, region):
         """
