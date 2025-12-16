@@ -155,8 +155,19 @@ class StoneCutterApp(ctk.CTk):
         
         # Calc Mode Switch
         self.calc_mode_var = ctk.StringVar(value="Algo")
-        self.calc_switch = ctk.CTkSegmentedButton(header_frame, values=["Algo", "Gemini"], variable=self.calc_mode_var, command=self.on_calc_mode_change)
+        
+        switch_values = ["Algo"]
+        # Check if Gemini is available
+        if self.gemini.api_key:
+            switch_values.append("Gemini")
+            
+        self.calc_switch = ctk.CTkSegmentedButton(header_frame, values=switch_values, variable=self.calc_mode_var, command=self.on_calc_mode_change)
         self.calc_switch.pack(side="left", padx=20)
+        
+        if not self.gemini.api_key:
+            # Maybe add a tooltip or label saying Gemini disabled?
+            # For now just disabling the selection or ensuring it defaults to Algo is enough via values
+            pass
 
         monitor_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         monitor_frame.pack(side="right")
